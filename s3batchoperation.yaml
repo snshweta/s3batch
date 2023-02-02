@@ -1,0 +1,183 @@
+# Create S3 Destination Bucket 
+# S3 Batch Role 
+# Pre req is 1. Have objects in source bucket 2. Create manifest file in source bucket 
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3Batch Operation 
+
+Parameters:
+  S3BatchSourceBucketName:
+    Description: Name of the Source Bucket
+    Type: String
+    Default: databucket
+
+  S3BatchTargetBucketName:
+    Description: Name of the Target Bucket
+    Type: String
+    Default: migrateddata
+
+  ManifestFile:
+    Description: Name of the Manifest File
+    Type: String
+    Default: S3BatchOperations_CSV_20230120.csv
+
+Resources:
+
+  S3BatchOperationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: S3BatchOperationRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - batchoperations.s3.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: S3BatchOperationPolicies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketLocation
+                Resource: !Join [ "", [ "arn:aws:s3:::", !Ref S3BatchSourceBucketName, "/*" ] ]
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketLocation
+                Resource: !Join [ "", [ "arn:aws:s3:::", !Ref S3BatchSourceBucketName, "/Manifest/*" ] ]
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketLocation
+                Resource: !Join [ "", [ "arn:aws:s3:::", !Ref S3BatchTargetBucketName, "/*" ] ]
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                Resource: !Join [ "", [ "arn:aws:s3:::", !Ref S3BatchTargetBucketName, "/Report/*" ] ]
+
+
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: createS3Batch
+      Description: LambdaFunction of python
+      Runtime: python3.7
+      Code:
+        S3Bucket: s3sourcereportbatch
+        S3Key: "s3batchjob.zip"
+      Handler: s3batchjob.lambda_handler
+      MemorySize: 128
+      Timeout: 10
+      Role:
+        Fn::GetAtt:
+          - S3BatchLambdaRole
+          - Arn
+      Environment:
+        Variables:
+          sourceBucketArn : !GetAtt S3BatchSourceBucketName.Arn
+          targetBucketArn : !GetAtt S3BatchTargetBucketName.Arn
+          sourceBucket : !Ref S3BatchSourceBucketName
+          manifestFile : !Ref ManifestFile
+          s3BatchRole : !GetAtt S3BatchOperationRole.Arn
+          accountId: !Ref 'AWS::AccountId'
+
+
+  
+  S3BatchLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: Lambda-Batch-Role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+      Path: /
+      Policies:
+      - PolicyName: "AllowLogging"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: s3BatchOperation
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'iam:PassRole'
+            Resource:  !GetAtt S3BatchOperationRole.Arn
+          - Effect: Allow
+            Action:
+            - 's3:CreateJob'
+            Resource:  '*'
+
+  CloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: S3BatchOperation
+      Description: Trigger Lambda that creates S3Batch Job
+      EventBusName: default
+      State: ENABLED
+      EventPattern: {
+                "source": ["aws.s3"],
+                "detail-type": ["Object Created"],
+                "detail": {
+                      "bucket": {
+                             "name": ["s3sourcereportbatch"],
+                             "key": ["Manifest/"]
+                            }
+                           }
+                    }
+      Targets: 
+        - Id: 'LambdaTarget'
+          Arn: !GetAtt LambdaFunction.Arn
+
+  
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudWatchEventRule.Arn
+
+
+Outputs:
+  S3BatchSourceBucketName:
+    Value: !Ref S3BatchSourceBucketName
+    Description: Name of S3 batch source bucket
+
+
+  S3BatchTargetBucketName:
+    Value: !Ref S3BatchTargetBucketName
+    Description: Name of S3 batch target bucket
+
+  S3BatchOperationRoleARN:
+    Value: !GetAtt [S3BatchOperationRole, Arn]
+    Description: ARN of batch operation role
